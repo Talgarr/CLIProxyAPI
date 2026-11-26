@@ -1,5 +1,5 @@
-// Package vertex provides token storage for Google Vertex AI Gemini via service account credentials.
-// It serialises service account JSON into an auth file that is consumed by the runtime executor.
+// Package vertex provides credential storage for Google Vertex AI Gemini.
+// It persists service accounts and ADC for use by the runtime executor.
 package vertex
 
 import (
@@ -12,12 +12,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// VertexCredentialStorage stores the service account JSON for Vertex AI access.
-// The content is persisted verbatim under the "service_account" key, together with
-// helper fields for project, location and email to improve logging and discovery.
+// VertexCredentialStorage persists service-account or ADC credentials together
+// with project, location, and account metadata for Vertex AI access.
 type VertexCredentialStorage struct {
 	// ServiceAccount holds the parsed service account JSON content.
-	ServiceAccount map[string]any `json:"service_account"`
+	ServiceAccount map[string]any `json:"service_account,omitempty"`
+
+	// ADC contains imported Application Default Credentials, including user and
+	// impersonated credentials. UseADC selects discovery on the runtime host.
+	ADC            map[string]any `json:"adc,omitempty"`
+	UseADC         bool           `json:"use_adc,omitempty"`
+	QuotaProjectID string         `json:"quota_project_id,omitempty"`
 
 	// ProjectID is derived from the service account JSON (project_id).
 	ProjectID string `json:"project_id"`
@@ -51,8 +56,8 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 	if s == nil {
 		return fmt.Errorf("vertex credential: storage is nil")
 	}
-	if s.ServiceAccount == nil {
-		return fmt.Errorf("vertex credential: service account content is empty")
+	if s.ServiceAccount == nil && s.ADC == nil && !s.UseADC {
+		return fmt.Errorf("vertex credential: credential content is empty")
 	}
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
@@ -66,7 +71,7 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: merge metadata failed: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := os.OpenFile(authFilePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("vertex credential: create file failed: %w", err)
 	}
@@ -75,6 +80,9 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 			log.Errorf("vertex credential: failed to close file: %v", errClose)
 		}
 	}()
+	if err = f.Chmod(0o600); err != nil {
+		return fmt.Errorf("vertex credential: set permissions failed: %w", err)
+	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err = enc.Encode(data); err != nil {

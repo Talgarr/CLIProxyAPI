@@ -157,6 +157,8 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+For keyless Google Vertex AI authentication, see [Vertex AI with Application Default Credentials](docs/vertex-adc.md).
+
 [Claude Code with a Codex backend](examples/claude-code-codex/README.md): optional visible progress, classifier routing, image-tool pass-through, and latency diagnostics.
 
 ## Management API

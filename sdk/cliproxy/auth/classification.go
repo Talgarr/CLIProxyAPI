@@ -128,6 +128,12 @@ func authHasOAuthMetadata(auth *Auth) bool {
 	if sa, ok := auth.Metadata["service_account"].(map[string]any); ok && len(sa) > 0 {
 		return true
 	}
+	if adc, ok := auth.Metadata["adc"].(map[string]any); ok && len(adc) > 0 {
+		return true
+	}
+	if enabled, _ := auth.Metadata["use_adc"].(bool); enabled {
+		return true
+	}
 	return false
 }
 

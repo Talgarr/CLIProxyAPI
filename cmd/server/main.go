@@ -136,6 +136,8 @@ func run() (exitStatus int) {
 	var discoverServiceType string
 	var discoverInclude []string
 	var discoverExclude []string
+	var vertexADC bool
+	var vertexADCOptions cmd.VertexADCOptions
 	var vertexImport string
 	var vertexImportPrefix string
 	var siwcBind string
@@ -169,6 +171,14 @@ func run() (exitStatus int) {
 	flag.Func("discover-include", "Comma-separated interface names to scan during LAN discovery", appendCSV(&discoverInclude))
 	flag.Func("discover-exclude", "Comma-separated interface names to skip during LAN discovery", appendCSV(&discoverExclude))
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
+	flag.BoolVar(&vertexADC, "vertex-adc", false, "Register existing Application Default Credentials for Vertex AI")
+	flag.BoolVar(&vertexADCOptions.Login, "vertex-adc-login", false, "Login to Vertex AI using gcloud Application Default Credentials")
+	flag.StringVar(&vertexADCOptions.File, "vertex-adc-file", "", "ADC JSON file to register (use with -vertex-adc)")
+	flag.StringVar(&vertexADCOptions.Project, "vertex-adc-project", "", "Vertex AI resource project for ADC")
+	flag.StringVar(&vertexADCOptions.Location, "vertex-adc-location", "global", "Vertex AI location for ADC")
+	flag.StringVar(&vertexADCOptions.Prefix, "vertex-adc-prefix", "", "Model namespace prefix for Vertex ADC")
+	flag.StringVar(&vertexADCOptions.QuotaProject, "vertex-adc-quota-project", "", "Override the ADC quota project")
+	flag.StringVar(&vertexADCOptions.ImpersonateServiceAccount, "vertex-adc-impersonate-service-account", "", "Service account to impersonate during -vertex-adc-login")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&siwcBind, "siwc-bind", "", "Bind Sign in with ChatGPT (SIWC) credentials to a Codex credential file")
@@ -627,7 +637,7 @@ func run() (exitStatus int) {
 		ProxyURL:     loginProxyURL,
 	}
 
-	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || copilotLogin || devinLogin || metaLogin
+	commandMode := vertexADC || vertexADCOptions.Login || vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || copilotLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -679,7 +689,12 @@ func run() (exitStatus int) {
 
 	// Handle different command modes based on the provided flags.
 
-	if vertexImport != "" {
+	if vertexADC || vertexADCOptions.Login {
+		if errADC := cmd.DoVertexADCLogin(cfg, options, vertexADCOptions); errADC != nil {
+			log.Error(errADC)
+			return 1
+		}
+	} else if vertexImport != "" {
 		// Handle Vertex service account import
 		cmd.DoVertexImport(cfg, vertexImport, vertexImportPrefix)
 	} else if siwcBind != "" {

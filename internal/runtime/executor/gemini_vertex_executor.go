@@ -1,6 +1,6 @@
 // Package executor provides runtime execution capabilities for various AI service providers.
 // This file implements the Vertex AI Gemini executor that talks to Google Vertex AI
-// endpoints using service account credentials or API keys.
+// endpoints using service-account credentials, ADC, or API keys.
 package executor
 
 import (
@@ -210,9 +210,10 @@ func readVertexImagenResponse(body io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-// GeminiVertexExecutor sends requests to Vertex AI Gemini endpoints using service account credentials.
+// GeminiVertexExecutor sends requests to Vertex AI with service accounts, ADC, or API keys.
 type GeminiVertexExecutor struct {
-	cfg *config.Config
+	cfg       *config.Config
+	adcTokens *helps.VertexADCTokenCache
 }
 
 // NewGeminiVertexExecutor creates a new Vertex AI Gemini executor instance.
@@ -223,7 +224,7 @@ type GeminiVertexExecutor struct {
 // Returns:
 //   - *GeminiVertexExecutor: A new Vertex AI Gemini executor instance
 func NewGeminiVertexExecutor(cfg *config.Config) *GeminiVertexExecutor {
-	return &GeminiVertexExecutor{cfg: cfg}
+	return &GeminiVertexExecutor{cfg: cfg, adcTokens: &helps.VertexADCTokenCache{}}
 }
 
 // Identifier returns the executor identifier.
@@ -244,7 +245,7 @@ func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if errCreds != nil {
 		return errCreds
 	}
-	token, errToken := vertexAccessToken(req.Context(), e.cfg, auth, saJSON)
+	token, errToken := e.accessToken(req.Context(), auth, saJSON)
 	if errToken != nil {
 		return errToken
 	}
@@ -253,6 +254,7 @@ func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Del("x-goog-api-key")
+	vertexauth.ApplyQuotaProject(req, auth.Metadata)
 	return nil
 }
 
@@ -362,12 +364,12 @@ func normalizeVertexOpenAPIRequest(req cliproxyexecutor.Request, opts cliproxyex
 	return req, opts
 }
 
-func hasVertexServiceAccount(auth *cliproxyauth.Auth) bool {
+func hasVertexOAuthCredentials(auth *cliproxyauth.Auth) bool {
 	if auth == nil || auth.Metadata == nil {
 		return false
 	}
 	sa, ok := auth.Metadata["service_account"].(map[string]any)
-	return ok && len(sa) > 0
+	return (ok && len(sa) > 0) || vertexauth.UsesADC(auth.Metadata)
 }
 
 func (e *GeminiVertexExecutor) vertexOpenAPILocation(auth *cliproxyauth.Auth, defaultLocation string) string {
@@ -379,12 +381,12 @@ func (e *GeminiVertexExecutor) vertexOpenAPILocation(auth *cliproxyauth.Auth, de
 
 func (e *GeminiVertexExecutor) resolveOpenAPICredentials(ctx context.Context, auth *cliproxyauth.Auth) (string, string, error) {
 	apiKey, baseURL := vertexAPICreds(auth)
-	if apiKey == "" || hasVertexServiceAccount(auth) {
+	if apiKey == "" || hasVertexOAuthCredentials(auth) {
 		projectID, location, saJSON, errCreds := vertexCreds(auth)
 		if errCreds != nil {
 			return "", "", errCreds
 		}
-		token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON)
+		token, errTok := e.accessToken(ctx, auth, saJSON)
 		if errTok != nil {
 			log.Errorf("vertex executor: access token error: %v", errTok)
 			return "", "", statusErr{code: 500, msg: "internal server error"}
@@ -420,7 +422,7 @@ func (e *GeminiVertexExecutor) executeOpenAPI(ctx context.Context, auth *cliprox
 		reporter.TrackFailure(ctx, &errCreds)
 		return resp, errCreds
 	}
-	return NewOpenAICompatExecutor(e.Identifier(), e.cfg).executeWithCredentials(ctx, auth, req, opts, openAPIBaseURL, token, nil)
+	return NewOpenAICompatExecutor(e.Identifier(), e.cfg).executeWithCredentials(ctx, helps.VertexADCQuotaAuth(auth), req, opts, openAPIBaseURL, token, nil)
 }
 
 func (e *GeminiVertexExecutor) executeOpenAPIStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
@@ -432,10 +434,10 @@ func (e *GeminiVertexExecutor) executeOpenAPIStream(ctx context.Context, auth *c
 		reporter.TrackFailure(ctx, &errCreds)
 		return nil, errCreds
 	}
-	return NewOpenAICompatExecutor(e.Identifier(), e.cfg).executeStreamWithCredentials(ctx, auth, req, opts, openAPIBaseURL, token, nil)
+	return NewOpenAICompatExecutor(e.Identifier(), e.cfg).executeStreamWithCredentials(ctx, helps.VertexADCQuotaAuth(auth), req, opts, openAPIBaseURL, token, nil)
 }
 
-// Refresh refreshes the authentication credentials (no-op for Vertex).
+// Refresh delegates Home refreshes; local Vertex tokens are acquired lazily per request.
 func (e *GeminiVertexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
 		return refreshed, err
@@ -528,7 +530,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token, errTok := e.accessToken(ctx, auth, saJSON); errTok == nil && token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
@@ -538,6 +540,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
+		vertexauth.ApplyQuotaProject(httpReq, auth.Metadata)
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 
@@ -910,7 +913,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		return nil, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token, errTok := e.accessToken(ctx, auth, saJSON); errTok == nil && token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
@@ -920,6 +923,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
+		vertexauth.ApplyQuotaProject(httpReq, auth.Metadata)
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 
@@ -1712,7 +1716,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		return cliproxyexecutor.Response{}, errNewReq
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
+	if token, errTok := e.accessToken(ctx, auth, saJSON); errTok == nil && token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
@@ -1722,6 +1726,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
+		vertexauth.ApplyQuotaProject(httpReq, auth.Metadata)
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 
@@ -1885,7 +1890,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
-// vertexCreds extracts project, location and raw service account JSON from auth metadata.
+// vertexCreds extracts project, location, and service-account or ADC JSON.
 func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccountJSON []byte, err error) {
 	if a == nil || a.Metadata == nil {
 		return "", "", nil, fmt.Errorf("vertex executor: missing auth metadata")
@@ -1906,6 +1911,10 @@ func vertexCreds(a *cliproxyauth.Auth) (projectID, location string, serviceAccou
 		location = strings.TrimSpace(v)
 	} else {
 		location = "global"
+	}
+	if vertexauth.UsesADC(a.Metadata) {
+		data, errADC := vertexauth.ADCJSON(a.Metadata)
+		return projectID, location, data, errADC
 	}
 	var sa map[string]any
 	if raw, ok := a.Metadata["service_account"].(map[string]any); ok {
@@ -1934,7 +1943,7 @@ func vertexAPICreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		apiKey = a.Attributes["api_key"]
 		baseURL = a.Attributes["base_url"]
 	}
-	if apiKey == "" && a.Metadata != nil {
+	if apiKey == "" && a.Metadata != nil && !vertexauth.UsesADC(a.Metadata) {
 		if v, ok := a.Metadata["access_token"].(string); ok {
 			apiKey = v
 		}
@@ -1998,6 +2007,17 @@ func vertexBaseURL(location string) string {
 		return fmt.Sprintf("https://aiplatform.%s.rep.googleapis.com", strings.ToLower(loc))
 	}
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
+}
+
+func (e *GeminiVertexExecutor) accessToken(ctx context.Context, auth *cliproxyauth.Auth, data []byte) (string, error) {
+	if auth != nil && vertexauth.UsesADC(auth.Metadata) {
+		cache := e.adcTokens
+		if cache == nil {
+			cache = &helps.VertexADCTokenCache{}
+		}
+		return cache.Token(ctx, e.cfg, auth)
+	}
+	return vertexAccessToken(ctx, e.cfg, auth, data)
 }
 
 func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (string, error) {
@@ -2123,7 +2143,7 @@ func (e *GeminiVertexExecutor) executeInteractions(ctx context.Context, auth *cl
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	} else {
-		token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON)
+		token, errTok := e.accessToken(ctx, auth, saJSON)
 		if errTok != nil {
 			log.Errorf("vertex executor: interactions access token error: %v", errTok)
 			return resp, statusErr{code: 500, msg: "internal server error"}
@@ -2140,6 +2160,7 @@ func (e *GeminiVertexExecutor) executeInteractions(ctx context.Context, auth *cl
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
+		vertexauth.ApplyQuotaProject(httpReq, auth.Metadata)
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 
@@ -2253,7 +2274,7 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 	if apiKey != "" {
 		httpReq.Header.Set("x-goog-api-key", apiKey)
 	} else {
-		token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON)
+		token, errTok := e.accessToken(ctx, auth, saJSON)
 		if errTok != nil {
 			log.Errorf("vertex executor: interactions access token error: %v", errTok)
 			return nil, statusErr{code: 500, msg: "internal server error"}
@@ -2270,6 +2291,7 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
+		vertexauth.ApplyQuotaProject(httpReq, auth.Metadata)
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 

@@ -185,7 +185,7 @@ retain the corresponding business operation's fields.
 | `/credentials/fields` | PATCH | Change credential fields. |
 | `/credentials/refresh` | POST | Refresh credentials. |
 | `/credentials/verify` | POST | Run an operator-triggered, account-pinned inference verification using an isolated session and minimal 1-token prompt. |
-| `/oauth/import?provider=vertex` | POST | Import a Vertex service account using a multipart `file` upload. |
+| `/oauth/import?provider=vertex` | POST | Import a Vertex service account or ADC credential using a multipart `file` upload. |
 | `/oauth/auth-url?provider=<provider>` | GET, POST | Start built-in or plugin OAuth (supports `name`/`auth_index` for targeted credential recovery and optional `verify` opt-in). |
 | `/oauth/siwc/bind` | POST | Start SIWC binding to an existing file-backed Codex OAuth credential. |
 | `/oauth/siwc/status` | GET | Read local SIWC credential status (`off`, `valid`, or `invalid`). |
@@ -229,6 +229,11 @@ not mean credential exchange and persistence have completed.
 
 Import uses `POST /v8/management/oauth/import?provider=vertex`. The `provider`
 query parameter is required; Vertex is currently the supported import provider.
+Upload a multipart `file` containing either a Vertex service-account JSON key or
+a Google Application Default Credentials (ADC) JSON file (such as
+`authorized_user` or `impersonated_service_account`). Optional form or query
+fields `project_id`, `location`, `prefix`, `quota_project_id`, and `auth_mode`
+(`service_account` or `adc`) configure the imported credential.
 
 ### Sign in with ChatGPT (SIWC) binding
 
